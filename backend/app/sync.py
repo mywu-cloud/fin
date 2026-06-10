@@ -5,6 +5,13 @@ Sources:
   - TWSE OpenAPI  (listed stocks + close price)
   - TPEx OpenAPI  (OTC stocks  + close price)
   - FinMind API   (TaiwanStockMonthRevenue)
+
+FinMind TaiwanStockMonthRevenue field mapping:
+  date           – 公告日 (YYYY-MM-01), NOT the revenue month
+  stock_id       – stock code
+  revenue_year   – actual year of the revenue month
+  revenue_month  – actual month number (1-12)
+  revenue        – monthly revenue in NT$ (not 千元)
 """
 import asyncio
 import logging
@@ -12,7 +19,6 @@ import os
 from datetime import date, datetime
 
 import httpx
-from sqlalchemy import select, insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .database import AsyncSessionLocal, init_db
@@ -22,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "")
 FINMIND_API = "https://api.finmindtrade.com/api/v4/data"
+
 
 # ---------------------------------------------------------------------------
 # Stock list helpers
@@ -34,7 +41,7 @@ async def _fetch_twse_stocks(client: httpx.AsyncClient) -> list[dict]:
         r = await client.get(url, timeout=30)
         r.raise_for_status()
         data = r.json()
-        # Field mapping: Code, Name, ClosingPrice
+        # Fields: Code, Name, ClosingPrice (string with commas)
         stocks = []
         for item in data:
             code = item.get("Code", "").strip()
@@ -42,14 +49,20 @@ async def _fetch_twse_stocks(client: httpx.AsyncClient) -> list[dict]:
             close_raw = item.get("ClosingPrice", "")
             if not code or not name:
                 continue
+            # Skip non-stock entries (preferred shares, ETF bonds, etc. may appear)
             try:
-                close = float(close_raw.replace(",", "")) if close_raw else None
+                close = float(str(close_raw).replace(",", "")) if close_raw else None
             except (ValueError, AttributeError):
                 close = None
-            stocks.append({"stock_id": code, "stock_name": name, "market": "TWSE", "close_price": close})
+            stocks.append({
+                "stock_id": code,
+                "stock_name": name,
+                "market": "TWSE",
+                "close_price": close,
+            })
         logger.info(f"TWSE: fetched {len(stocks)} stocks")
         if stocks:
-            logger.info(f"TWSE sample: {stocks[:5]}")
+            logger.info(f"TWSE sample (first 5): {stocks[:5]}")
         return stocks
     except Exception as e:
         logger.error(f"TWSE fetch error: {e}")
@@ -63,7 +76,7 @@ async def _fetch_tpex_stocks(client: httpx.AsyncClient) -> list[dict]:
         r = await client.get(url, timeout=30)
         r.raise_for_status()
         data = r.json()
-        # Field mapping: SecuritiesCompanyCode, CompanyName, Close
+        # Fields: SecuritiesCompanyCode, CompanyName, Close (string)
         stocks = []
         for item in data:
             code = item.get("SecuritiesCompanyCode", "").strip()
@@ -72,13 +85,18 @@ async def _fetch_tpex_stocks(client: httpx.AsyncClient) -> list[dict]:
             if not code or not name:
                 continue
             try:
-                close = float(close_raw.replace(",", "")) if close_raw else None
+                close = float(str(close_raw).replace(",", "")) if close_raw else None
             except (ValueError, AttributeError):
                 close = None
-            stocks.append({"stock_id": code, "stock_name": name, "market": "TPEx", "close_price": close})
+            stocks.append({
+                "stock_id": code,
+                "stock_name": name,
+                "market": "TPEx",
+                "close_price": close,
+            })
         logger.info(f"TPEx: fetched {len(stocks)} stocks")
         if stocks:
-            logger.info(f"TPEx sample: {stocks[:5]}")
+            logger.info(f"TPEx sample (first 5): {stocks[:5]}")
         return stocks
     except Exception as e:
         logger.error(f"TPEx fetch error: {e}")
@@ -92,7 +110,15 @@ async def _fetch_tpex_stocks(client: httpx.AsyncClient) -> list[dict]:
 async def _fetch_finmind_revenue(
     client: httpx.AsyncClient, stock_id: str, start_date: str = "2015-01-01"
 ) -> list[dict]:
-    """Fetch monthly revenue for a single stock from FinMind."""
+    """Fetch monthly revenue for a single stock from FinMind.
+
+    Returned row fields:
+      date           – report date "YYYY-MM-01"
+      stock_id       – e.g. "2330"
+      revenue_year   – year of the revenue month (int)
+      revenue_month  – month number 1-12 (int)
+      revenue        – NT$ amount (int/float)
+    """
     params = {
         "dataset": "TaiwanStockMonthRevenue",
         "data_id": stock_id,
@@ -104,9 +130,15 @@ async def _fetch_finmind_revenue(
         r.raise_for_status()
         payload = r.json()
         if payload.get("status") != 200:
-            logger.warning(f"FinMind {stock_id}: status={payload.get('status')} msg={payload.get('msg')}")
+            logger.warning(
+                f"FinMind {stock_id}: status={payload.get('status')} "
+                f"msg={payload.get('msg')}"
+            )
             return []
         rows = payload.get("data", [])
+        if stock_id == "2330" and rows:
+            logger.info(f"FinMind 2330 sample (first 5): {rows[:5]}")
+            logger.info(f"FinMind 2330 field names: {list(rows[0].keys())}")
         return rows
     except Exception as e:
         logger.error(f"FinMind {stock_id} error: {e}")
@@ -145,36 +177,74 @@ async def _upsert_stocks(stocks: list[dict]):
     logger.info(f"Upserted {len(stocks)} stocks")
 
 
+def _calc_pct_change(new_val, old_val) -> float | None:
+    """Calculate percentage change from old to new."""
+    if new_val is None or old_val is None or old_val == 0:
+        return None
+    return round((new_val - old_val) / abs(old_val) * 100, 2)
+
+
 async def _upsert_revenues(rows: list[dict]):
-    """Upsert monthly revenue rows into DB.
-    
-    FinMind fields: stock_id, date (YYYY-MM-01), revenue, revenue_month,
-    revenue_year, revenue_YoY (or similar), revenue_MoM
+    """Upsert monthly revenue rows.
+
+    FinMind fields:
+      revenue_year  (int)  – actual year
+      revenue_month (int)  – actual month 1-12
+      revenue       (int)  – NT$ (we store as-is, display layer converts)
+
+    We calculate MoM and YoY from the batch itself.
     """
     if not rows:
         return
+
+    # Build a lookup {(year, month): revenue} for computing MoM/YoY
+    rev_map: dict[tuple, int] = {}
+    for r in rows:
+        y = int(r.get("revenue_year", 0))
+        m = int(r.get("revenue_month", 0))
+        rev = int(r.get("revenue", 0) or 0)
+        if y and m:
+            rev_map[(y, m)] = rev
+
     async with AsyncSessionLocal() as session:
         for r in rows:
             try:
-                stock_id = r.get("stock_id", "")
-                # date is like "2024-01-01"
-                d = r.get("date", "")
-                if not d or not stock_id:
+                stock_id = r.get("stock_id", "").strip()
+                y = int(r.get("revenue_year", 0))
+                m = int(r.get("revenue_month", 0))
+                if not stock_id or not y or not m:
                     continue
-                parts = d.split("-")
-                year, month = int(parts[0]), int(parts[1])
                 revenue = int(r.get("revenue", 0) or 0)
-                revenue_mom = _safe_float(r.get("revenue_MoM") or r.get("revenue_mom"))
-                revenue_yoy = _safe_float(r.get("revenue_YoY") or r.get("revenue_yoy"))
-                cum_rev_raw = r.get("cum_revenue") or r.get("cumulative_revenue")
-                cumulative_revenue = int(cum_rev_raw) if cum_rev_raw else None
-                cum_yoy_raw = r.get("cum_revenue_YoY") or r.get("cumulative_revenue_yoy")
-                cumulative_yoy = _safe_float(cum_yoy_raw)
+
+                # MoM: compare to previous month
+                prev_m_key = (y, m - 1) if m > 1 else (y - 1, 12)
+                prev_rev = rev_map.get(prev_m_key)
+                revenue_mom = _calc_pct_change(revenue, prev_rev)
+
+                # YoY: compare to same month last year
+                yoy_key = (y - 1, m)
+                yoy_rev = rev_map.get(yoy_key)
+                revenue_yoy = _calc_pct_change(revenue, yoy_rev)
+
+                # Cumulative: sum Jan..month of the year
+                cumulative_revenue = sum(
+                    rev_map.get((y, mo), 0) for mo in range(1, m + 1)
+                    if (y, mo) in rev_map
+                )
+                if cumulative_revenue == 0:
+                    cumulative_revenue = None
+
+                # Cumulative YoY
+                cum_prev = sum(
+                    rev_map.get((y - 1, mo), 0) for mo in range(1, m + 1)
+                    if (y - 1, mo) in rev_map
+                )
+                cumulative_yoy = _calc_pct_change(cumulative_revenue, cum_prev if cum_prev else None)
 
                 stmt = sqlite_insert(MonthRevenue).values(
                     stock_id=stock_id,
-                    year=year,
-                    month=month,
+                    year=y,
+                    month=m,
                     revenue=revenue,
                     revenue_mom=revenue_mom,
                     revenue_yoy=revenue_yoy,
@@ -182,7 +252,6 @@ async def _upsert_revenues(rows: list[dict]):
                     cumulative_yoy=cumulative_yoy,
                 )
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=None,
                     constraint="uq_stock_ym",
                     set_={
                         "revenue": stmt.excluded.revenue,
@@ -196,15 +265,7 @@ async def _upsert_revenues(rows: list[dict]):
             except Exception as e:
                 logger.warning(f"Revenue row error: {e} | row={r}")
         await session.commit()
-
-
-def _safe_float(val) -> float | None:
-    if val is None:
-        return None
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return None
+    logger.info(f"Upserted {len(rows)} revenue rows")
 
 
 # ---------------------------------------------------------------------------
@@ -213,8 +274,8 @@ def _safe_float(val) -> float | None:
 
 async def run_sync(full: bool = False):
     """
-    full=True  → fetch ALL stocks' revenue history (slow, for initial load)
-    full=False → only update stock list + close prices + last 2 months revenue
+    full=True  → fetch ALL stocks' revenue history
+    full=False → update stock list + prices + recent revenue for priority stocks
     """
     logger.info(f"run_sync started (full={full})")
     await init_db()
@@ -232,37 +293,37 @@ async def run_sync(full: bool = False):
             logger.warning("No stocks fetched; skipping revenue sync")
             return
 
-        # 2. Determine which stocks to fetch revenue for
+        # 2. Determine which stocks & date range to fetch revenue for
         if full:
             stock_ids = [s["stock_id"] for s in all_stocks]
             start_date = "2010-01-01"
         else:
-            # Incremental: only main index stocks or those already in DB
-            # For quick startup, just do top stocks + any already in DB
-            priority_ids = ["2330", "2317", "2454", "2382", "2308",
-                            "2303", "3711", "2412", "1301", "1303"]
+            # Incremental: priority large-cap stocks
+            priority_ids = [
+                "2330", "2317", "2454", "2382", "2308",
+                "2303", "3711", "2412", "1301", "1303",
+                "2881", "2882", "2886", "2891", "5880",
+            ]
             stock_ids = priority_ids
-            # Use recent 3 months
             today = date.today()
-            if today.month >= 3:
-                start_date = f"{today.year}-{today.month-2:02d}-01"
+            # Go back ~15 months to compute full YoY for current year
+            if today.month >= 4:
+                start_date = f"{today.year - 1}-01-01"
             else:
-                start_date = f"{today.year-1}-{12+today.month-2:02d}-01"
+                start_date = f"{today.year - 2}-01-01"
 
         logger.info(f"Fetching revenue for {len(stock_ids)} stocks from {start_date}")
 
-        # 3. Fetch revenue with rate-limiting (avoid API throttle)
+        # 3. Fetch revenue with rate-limiting
         sem = asyncio.Semaphore(3)
 
-        async def fetch_and_store(sid):
+        async def fetch_and_store(sid: str):
             async with sem:
                 rows = await _fetch_finmind_revenue(client, sid, start_date)
                 if rows:
                     logger.info(f"  {sid}: {len(rows)} revenue rows")
-                    if sid == "2330" and rows:
-                        logger.info(f"  2330 sample: {rows[:5]}")
                     await _upsert_revenues(rows)
-                await asyncio.sleep(0.3)  # be polite to FinMind
+                await asyncio.sleep(0.3)
 
         tasks = [fetch_and_store(sid) for sid in stock_ids]
         await asyncio.gather(*tasks)
