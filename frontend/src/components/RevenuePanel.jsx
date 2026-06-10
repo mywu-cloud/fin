@@ -5,11 +5,23 @@ import {
 } from 'recharts'
 import styles from './RevenuePanel.module.css'
 
+// Revenue is stored in NT$; display in 億 (100M) or 千萬 (10M)
 function fmtRevenue(val) {
   if (val == null) return '-'
   const n = Number(val)
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'B'
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'M'
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + ' 億'
+  if (n >= 100_000_000) return (n / 100_000_000).toFixed(2) + ' 億'
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + ' 百萬'
+  return n.toLocaleString()
+}
+
+// Short form for chart axis ticks
+function fmtRevenueAxis(val) {
+  if (val == null) return ''
+  const n = Number(val)
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(1) + '億'
+  if (n >= 100_000_000) return (n / 100_000_000).toFixed(0) + '億'
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(0) + 'M'
   return n.toLocaleString()
 }
 
@@ -96,21 +108,21 @@ export default function RevenuePanel() {
         <>
           {/* Revenue Bar Chart */}
           <div className={styles.chartSection}>
-            <h3 className={styles.chartTitle}>月營收 (千元)</h3>
+            <h3 className={styles.chartTitle}>月營收 (NT$)</h3>
             <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={chartData} margin={{ top: 8, right: 20, left: 10, bottom: 40 }}>
+              <BarChart data={chartData} margin={{ top: 8, right: 20, left: 20, bottom: 40 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                 <XAxis
                   dataKey="label"
                   tick={{ fill: 'var(--text-secondary)', fontSize: 11 }}
                   angle={-45}
                   textAnchor="end"
-                  interval={Math.floor(chartData.length / 12)}
+                  interval={Math.max(0, Math.floor(chartData.length / 12) - 1)}
                 />
                 <YAxis
                   tick={{ fill: 'var(--text-secondary)', fontSize: 11 }}
-                  tickFormatter={v => fmtRevenue(v)}
-                  width={60}
+                  tickFormatter={fmtRevenueAxis}
+                  width={65}
                 />
                 <Tooltip
                   contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
@@ -133,7 +145,7 @@ export default function RevenuePanel() {
                   tick={{ fill: 'var(--text-secondary)', fontSize: 11 }}
                   angle={-45}
                   textAnchor="end"
-                  interval={Math.floor(chartData.length / 12)}
+                  interval={Math.max(0, Math.floor(chartData.length / 12) - 1)}
                 />
                 <YAxis
                   tick={{ fill: 'var(--text-secondary)', fontSize: 11 }}
@@ -164,10 +176,10 @@ export default function RevenuePanel() {
                 <thead>
                   <tr>
                     <th>年月</th>
-                    <th>月營收(千)</th>
+                    <th>月營收</th>
                     <th>月增率</th>
                     <th>年增率</th>
-                    <th>累計營收(千)</th>
+                    <th>累計營收</th>
                     <th>累計年增率</th>
                   </tr>
                 </thead>
@@ -175,14 +187,10 @@ export default function RevenuePanel() {
                   {revenue.map(r => (
                     <tr key={`${r.year}-${r.month}`}>
                       <td className={styles.dateCell}>{r.year}/{String(r.month).padStart(2, '0')}</td>
-                      <td className={styles.numCell}>{(r.revenue / 1000).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}</td>
+                      <td className={styles.numCell}>{fmtRevenue(r.revenue)}</td>
                       <td><PctBadge val={r.revenue_mom} /></td>
                       <td><PctBadge val={r.revenue_yoy} /></td>
-                      <td className={styles.numCell}>
-                        {r.cumulative_revenue != null
-                          ? (r.cumulative_revenue / 1000).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
-                          : '-'}
-                      </td>
+                      <td className={styles.numCell}>{fmtRevenue(r.cumulative_revenue)}</td>
                       <td><PctBadge val={r.cumulative_yoy} /></td>
                     </tr>
                   ))}
