@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-# Load .env before anything else
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -25,9 +25,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 一般產業股：4碼純數字，首碼 1-9（1101~9999）
+# 上櫃 TPEx 也是4碼數字，但從 1000 起，或少數 3~4 碼
+# 排除：00開頭(ETF), 含字母, 超過4碼數字, 4碼但以0開頭
+_STOCK_RE = re.compile(r'^[1-9][0-9]{3}$')
+
+def _is_industry_stock(stock_id: str) -> bool:
+    """Return True if stock_id is a regular industry stock (not ETF/warrant)."""
+    return bool(_STOCK_RE.match(stock_id))
+
 
 async def _safe_sync(full: bool = False) -> None:
-    """Run sync, swallow exceptions so server keeps running."""
     try:
         await run_sync(full=full)
     except Exception as exc:
@@ -35,17 +43,14 @@ async def _safe_sync(full: bool = False) -> None:
 
 
 async def _daily_scheduler() -> None:
-    """Pure-asyncio loop: fire sync every day at 18:30 CST."""
     while True:
         try:
             now = datetime.now()
-            # Seconds until next 18:30
-            target_hour, target_min = 18, 30
-            secs_today = (target_hour * 60 + target_min) * 60
+            secs_today = (18 * 60 + 30) * 60
             secs_now = (now.hour * 60 + now.minute) * 60 + now.second
             wait = secs_today - secs_now
             if wait <= 0:
-                wait += 86400  # already past 18:30, wait until tomorrow
+                wait += 86400
             logger.info("Daily sync scheduled in %.0f minutes", wait / 60)
             await asyncio.sleep(wait)
             logger.info("Running scheduled daily sync")
@@ -54,22 +59,16 @@ async def _daily_scheduler() -> None:
             break
         except Exception as exc:
             logger.error("Scheduler loop error: %s", exc)
-            await asyncio.sleep(3600)  # retry in 1h
+            await asyncio.sleep(3600)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     logger.info("DB initialised")
-
-    # Startup sync (non-blocking)
     asyncio.create_task(_safe_sync(full=False))
-
-    # Daily scheduler (pure asyncio, no APScheduler)
     sched_task = asyncio.create_task(_daily_scheduler())
-
     yield
-
     sched_task.cancel()
     try:
         await sched_task
@@ -88,10 +87,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
 
 @app.get("/health")
 async def health():
@@ -117,6 +112,8 @@ async def list_stocks(
     stmt = stmt.order_by(Stock.stock_id).offset(skip).limit(limit)
     result = await db.execute(stmt)
     stocks = result.scalars().all()
+    # Filter out ETF / warrants / preferred shares in Python
+    # (SQLite regex support is limited)
     return [
         {
             "stock_id": s.stock_id,
@@ -126,6 +123,7 @@ async def list_stocks(
             "updated_at": s.updated_at,
         }
         for s in stocks
+        if _is_industry_stock(s.stock_id)
     ]
 
 
