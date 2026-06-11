@@ -13,7 +13,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from .database import get_db, init_db
 from .models import Stock, MonthRevenue
@@ -25,7 +25,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-scheduler = AsyncIOScheduler(timezone="Asia/Taipei")
+scheduler = BackgroundScheduler(timezone="Asia/Taipei")
+
+
+async def _safe_sync(full: bool = False) -> None:
+    """Run sync and swallow exceptions so server keeps running."""
+    try:
+        await run_sync(full=full)
+    except Exception as exc:
+        logger.error("run_sync crashed: %s", exc, exc_info=True)
+
+
+def _schedule_sync() -> None:
+    """Called by APScheduler (sync context) — fires async sync task."""
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        asyncio.run_coroutine_threadsafe(_safe_sync(full=False), loop)
+    else:
+        asyncio.run(_safe_sync(full=False))
 
 
 @asynccontextmanager
@@ -34,25 +51,33 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("DB initialised")
 
-    # Auto-sync on startup (incremental)
-    asyncio.create_task(run_sync(full=False))
+    # Auto-sync on startup (non-blocking background task)
+    asyncio.create_task(_safe_sync(full=False))
 
     # Schedule daily sync at 18:30 (after market close)
-    scheduler.add_job(
-        lambda: asyncio.create_task(run_sync(full=False)),
-        "cron",
-        hour=18,
-        minute=30,
-        id="daily_sync",
-    )
-    scheduler.start()
-    logger.info("Scheduler started")
+    try:
+        scheduler.add_job(
+            _schedule_sync,
+            "cron",
+            hour=18,
+            minute=30,
+            id="daily_sync",
+            replace_existing=True,
+        )
+        scheduler.start()
+        logger.info("Scheduler started (daily 18:30)")
+    except Exception as exc:
+        logger.warning("Scheduler failed to start: %s", exc)
 
     yield
 
     # Shutdown
-    scheduler.shutdown(wait=False)
-    logger.info("Scheduler stopped")
+    try:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+    except Exception:
+        pass
+    logger.info("Shutdown complete")
 
 
 app = FastAPI(title="Taiwan Stock Revenue API", lifespan=lifespan)
@@ -160,5 +185,5 @@ async def get_revenue(
 @app.post("/api/sync")
 async def trigger_sync(full: bool = False):
     """Manually trigger a data sync."""
-    asyncio.create_task(run_sync(full=full))
+    asyncio.create_task(_safe_sync(full=full))
     return {"status": "sync started", "full": full}
