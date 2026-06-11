@@ -32,12 +32,60 @@ FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "")
 FINMIND_API = "https://api.finmindtrade.com/api/v4/data"
 
 # ---------------------------------------------------------------------------
+# TWSE industry code → Chinese name mapping (固定對照表)
+# Source: 台灣證券交易所產業別分類
+# ---------------------------------------------------------------------------
+TWSE_INDUSTRY_MAP: Dict[str, str] = {
+    "01": "水泥工業",
+    "02": "食品工業",
+    "03": "塑膠工業",
+    "04": "紡織纖維",
+    "05": "電機機械",
+    "06": "電器電纜",
+    "07": "化學生技醫療",
+    "08": "玻璃陶瓷",
+    "09": "造紙工業",
+    "10": "鋼鐵工業",
+    "11": "橡膠工業",
+    "12": "汽車工業",
+    "13": "電子工業",
+    "14": "建材營造",
+    "15": "航運業",
+    "16": "觀光餐旅",
+    "17": "金融保險",
+    "18": "貿易百貨",
+    "19": "綜合",
+    "20": "其他",
+    "21": "化學工業",
+    "22": "生技醫療業",
+    "23": "油電燃氣業",
+    "24": "半導體業",
+    "25": "電腦及週邊設備業",
+    "26": "光電業",
+    "27": "通信網路業",
+    "28": "電子零組件業",
+    "29": "電子通路業",
+    "30": "資訊服務業",
+    "31": "其他電子業",
+    "32": "文化創意業",
+    "33": "農業科技業",
+    "34": "電子商務",
+    "35": "綠能環保",
+    "36": "數位雲端",
+    "37": "運動休閒",
+    "38": "居家生活",
+    "80": "管理股票",
+    "91": "存託憑證",
+}
+
+# ---------------------------------------------------------------------------
 # Industry mapping helpers
 # ---------------------------------------------------------------------------
 
 async def _fetch_twse_industry_map(client: httpx.AsyncClient) -> Dict[str, str]:
-    """Fetch 產業別 for TWSE listed stocks.
-    Uses t187ap03_L endpoint: fields include 公司代號, 產業別
+    """
+    Fetch 產業別 for TWSE listed stocks from t187ap03_L.
+    The endpoint returns numeric IndustryCode; translate to Chinese via TWSE_INDUSTRY_MAP.
     """
     url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
     try:
@@ -46,11 +94,25 @@ async def _fetch_twse_industry_map(client: httpx.AsyncClient) -> Dict[str, str]:
         data = r.json()
         result: Dict[str, str] = {}
         for item in data:
-            code = str(item.get("公司代號", "") or item.get("stock_id", "")).strip()
-            industry = str(item.get("產業別", "") or item.get("industry", "")).strip()
-            if code and industry:
+            code = str(
+                item.get("公司代號", "") or item.get("stock_id", "")
+            ).strip()
+            # 嘗試直接取中文產業別
+            industry_raw = str(
+                item.get("產業別", "") or item.get("IndustryCode", "")
+            ).strip()
+            if not code:
+                continue
+            # 如果是中文名稱就直接用；如果是數字代碼就查對照表
+            if industry_raw.lstrip("0123456789") == "":
+                # Numeric code — lookup Chinese name
+                industry = TWSE_INDUSTRY_MAP.get(industry_raw.zfill(2), industry_raw)
+            else:
+                industry = industry_raw
+            if industry:
                 result[code] = industry
-        logger.info("TWSE industry map: %d entries", len(result))
+        logger.info("TWSE industry map: %d entries, sample: %s",
+                    len(result), dict(list(result.items())[:3]))
         return result
     except Exception as e:
         logger.warning("TWSE industry map fetch error: %s", e)
@@ -58,58 +120,77 @@ async def _fetch_twse_industry_map(client: httpx.AsyncClient) -> Dict[str, str]:
 
 
 async def _fetch_tpex_industry_map(client: httpx.AsyncClient) -> Dict[str, str]:
-    """Fetch 產業別 for TPEx OTC stocks.
-    Uses mopsfin_t21sc03 endpoint: fields include SecuritiesCompanyCode, IndustryCode
-    Also try tpex_mainboard_peratio_analysis which has 產業別
     """
-    # Try primary endpoint
-    url = "https://www.tpex.org.tw/openapi/v1/mopsfin_t21sc03"
+    Fetch 產業別 for TPEx OTC stocks.
+    tpex_mainboard_daily_close_quotes sometimes contains IndustryCode.
+    Also try tpex_companies endpoint.
+    """
+    result: Dict[str, str] = {}
+
+    # Primary: try daily close quotes (has IndustryCode in some versions)
+    url1 = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
     try:
-        r = await client.get(url, timeout=30)
+        r = await client.get(url1, timeout=30)
         r.raise_for_status()
         data = r.json()
-        if isinstance(data, list) and data:
-            result: Dict[str, str] = {}
-            sample_keys = list(data[0].keys()) if data else []
-            logger.info("TPEx industry endpoint keys: %s", sample_keys)
+        if isinstance(data, list):
             for item in data:
-                # Try common field name patterns
-                code = (
-                    str(item.get("SecuritiesCompanyCode", "")
-                        or item.get("公司代號", "")
-                        or item.get("代號", "")).strip()
-                )
-                industry = (
-                    str(item.get("IndustryCode", "")
-                        or item.get("產業別", "")
-                        or item.get("產業類別", "")).strip()
-                )
-                if code and industry:
-                    result[code] = industry
-            logger.info("TPEx industry map: %d entries", len(result))
-            return result
+                code = str(item.get("SecuritiesCompanyCode", "")).strip()
+                ind = str(
+                    item.get("IndustryCode", "")
+                    or item.get("產業別", "")
+                    or item.get("產業類別", "")
+                ).strip()
+                if code and ind:
+                    result[code] = ind
+            if result:
+                logger.info("TPEx industry from close quotes: %d entries", len(result))
+                return result
     except Exception as e:
-        logger.warning("TPEx industry map (primary) error: %s", e)
+        logger.warning("TPEx close quotes error: %s", e)
 
-    # Fallback: try peratio endpoint
+    # Fallback: peratio analysis
     url2 = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis"
     try:
         r2 = await client.get(url2, timeout=30)
         r2.raise_for_status()
         data2 = r2.json()
-        if isinstance(data2, list) and data2:
-            result2: Dict[str, str] = {}
+        if isinstance(data2, list):
             for item in data2:
                 code = str(item.get("SecuritiesCompanyCode", "") or item.get("代號", "")).strip()
-                industry = str(item.get("IndustryCode", "") or item.get("產業別", "")).strip()
-                if code and industry:
-                    result2[code] = industry
-            logger.info("TPEx industry map (fallback): %d entries", len(result2))
-            return result2
+                ind = str(item.get("IndustryCode", "") or item.get("產業別", "")).strip()
+                if code and ind:
+                    result[code] = ind
+            logger.info("TPEx industry from peratio: %d entries", len(result))
+            return result
     except Exception as e2:
-        logger.warning("TPEx industry map (fallback) error: %s", e2)
+        logger.warning("TPEx peratio error: %s", e2)
 
-    return {}
+    # Final fallback: mopsfin_t21sc03
+    url3 = "https://www.tpex.org.tw/openapi/v1/mopsfin_t21sc03"
+    try:
+        r3 = await client.get(url3, timeout=30)
+        r3.raise_for_status()
+        data3 = r3.json()
+        if isinstance(data3, list) and data3:
+            logger.info("TPEx mopsfin keys: %s", list(data3[0].keys()))
+            for item in data3:
+                code = str(
+                    item.get("SecuritiesCompanyCode", "")
+                    or item.get("公司代號", "")
+                ).strip()
+                ind = str(
+                    item.get("IndustryCode", "")
+                    or item.get("產業別", "")
+                    or item.get("產業類別", "")
+                ).strip()
+                if code and ind:
+                    result[code] = ind
+            logger.info("TPEx industry from mopsfin: %d entries", len(result))
+    except Exception as e3:
+        logger.warning("TPEx mopsfin error: %s", e3)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -174,18 +255,16 @@ async def _fetch_tpex_stocks(
                 close = float(str(close_raw).replace(",", "")) if close_raw else None
             except (ValueError, AttributeError):
                 close = None
-            # TPEx close quote endpoint also contains industry in some versions
             industry = (
                 industry_map.get(code)
-                or item.get("IndustryCode", "")
-                or item.get("產業別", "")
+                or str(item.get("IndustryCode", "") or item.get("產業別", "")).strip()
                 or None
             )
             stocks.append({
                 "stock_id": code,
                 "stock_name": name,
                 "market": "TPEx",
-                "industry": industry,
+                "industry": industry if industry else None,
                 "close_price": close,
             })
         logger.info("TPEx: fetched %d stocks", len(stocks))
@@ -352,10 +431,6 @@ async def _upsert_revenues(rows: List[Dict]) -> None:
 # ---------------------------------------------------------------------------
 
 async def run_sync(full: bool = False) -> None:
-    """
-    full=True  - fetch ALL stocks' revenue history
-    full=False - update stock list + prices + recent revenue for priority stocks
-    """
     logger.info("run_sync started (full=%s)", full)
     await init_db()
 
