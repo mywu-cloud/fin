@@ -1,8 +1,8 @@
 """
 Data synchronisation helpers.
 Sources:
-  - TWSE OpenAPI  (listed stocks + close price)
-  - TPEx OpenAPI  (OTC stocks + close price)
+  - TWSE OpenAPI  (listed stocks + close price + industry)
+  - TPEx OpenAPI  (OTC stocks + close price + industry)
   - FinMind API   (TaiwanStockMonthRevenue)
 
 FinMind TaiwanStockMonthRevenue field mapping:
@@ -32,17 +32,100 @@ FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "")
 FINMIND_API = "https://api.finmindtrade.com/api/v4/data"
 
 # ---------------------------------------------------------------------------
+# Industry mapping helpers
+# ---------------------------------------------------------------------------
+
+async def _fetch_twse_industry_map(client: httpx.AsyncClient) -> Dict[str, str]:
+    """Fetch 產業別 for TWSE listed stocks.
+    Uses t187ap03_L endpoint: fields include 公司代號, 產業別
+    """
+    url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+    try:
+        r = await client.get(url, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        result: Dict[str, str] = {}
+        for item in data:
+            code = str(item.get("公司代號", "") or item.get("stock_id", "")).strip()
+            industry = str(item.get("產業別", "") or item.get("industry", "")).strip()
+            if code and industry:
+                result[code] = industry
+        logger.info("TWSE industry map: %d entries", len(result))
+        return result
+    except Exception as e:
+        logger.warning("TWSE industry map fetch error: %s", e)
+        return {}
+
+
+async def _fetch_tpex_industry_map(client: httpx.AsyncClient) -> Dict[str, str]:
+    """Fetch 產業別 for TPEx OTC stocks.
+    Uses mopsfin_t21sc03 endpoint: fields include SecuritiesCompanyCode, IndustryCode
+    Also try tpex_mainboard_peratio_analysis which has 產業別
+    """
+    # Try primary endpoint
+    url = "https://www.tpex.org.tw/openapi/v1/mopsfin_t21sc03"
+    try:
+        r = await client.get(url, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, list) and data:
+            result: Dict[str, str] = {}
+            sample_keys = list(data[0].keys()) if data else []
+            logger.info("TPEx industry endpoint keys: %s", sample_keys)
+            for item in data:
+                # Try common field name patterns
+                code = (
+                    str(item.get("SecuritiesCompanyCode", "")
+                        or item.get("公司代號", "")
+                        or item.get("代號", "")).strip()
+                )
+                industry = (
+                    str(item.get("IndustryCode", "")
+                        or item.get("產業別", "")
+                        or item.get("產業類別", "")).strip()
+                )
+                if code and industry:
+                    result[code] = industry
+            logger.info("TPEx industry map: %d entries", len(result))
+            return result
+    except Exception as e:
+        logger.warning("TPEx industry map (primary) error: %s", e)
+
+    # Fallback: try peratio endpoint
+    url2 = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis"
+    try:
+        r2 = await client.get(url2, timeout=30)
+        r2.raise_for_status()
+        data2 = r2.json()
+        if isinstance(data2, list) and data2:
+            result2: Dict[str, str] = {}
+            for item in data2:
+                code = str(item.get("SecuritiesCompanyCode", "") or item.get("代號", "")).strip()
+                industry = str(item.get("IndustryCode", "") or item.get("產業別", "")).strip()
+                if code and industry:
+                    result2[code] = industry
+            logger.info("TPEx industry map (fallback): %d entries", len(result2))
+            return result2
+    except Exception as e2:
+        logger.warning("TPEx industry map (fallback) error: %s", e2)
+
+    return {}
+
+
+# ---------------------------------------------------------------------------
 # Stock list helpers
 # ---------------------------------------------------------------------------
 
-async def _fetch_twse_stocks(client: httpx.AsyncClient) -> List[Dict]:
+async def _fetch_twse_stocks(
+    client: httpx.AsyncClient,
+    industry_map: Dict[str, str],
+) -> List[Dict]:
     """Fetch listed (上市) stocks from TWSE OpenAPI."""
     url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
     try:
         r = await client.get(url, timeout=30)
         r.raise_for_status()
         data = r.json()
-        # Fields: Code, Name, ClosingPrice (string with commas)
         stocks = []
         for item in data:
             code = item.get("Code", "").strip()
@@ -58,25 +141,28 @@ async def _fetch_twse_stocks(client: httpx.AsyncClient) -> List[Dict]:
                 "stock_id": code,
                 "stock_name": name,
                 "market": "TWSE",
+                "industry": industry_map.get(code),
                 "close_price": close,
             })
         logger.info("TWSE: fetched %d stocks", len(stocks))
         if stocks:
-            logger.info("TWSE sample (first 5): %s", stocks[:5])
+            logger.info("TWSE sample (first 3): %s", stocks[:3])
         return stocks
     except Exception as e:
         logger.error("TWSE fetch error: %s", e)
         return []
 
 
-async def _fetch_tpex_stocks(client: httpx.AsyncClient) -> List[Dict]:
+async def _fetch_tpex_stocks(
+    client: httpx.AsyncClient,
+    industry_map: Dict[str, str],
+) -> List[Dict]:
     """Fetch OTC (上櫃) stocks from TPEx OpenAPI."""
     url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
     try:
         r = await client.get(url, timeout=30)
         r.raise_for_status()
         data = r.json()
-        # Fields: SecuritiesCompanyCode, CompanyName, Close (string)
         stocks = []
         for item in data:
             code = item.get("SecuritiesCompanyCode", "").strip()
@@ -88,15 +174,23 @@ async def _fetch_tpex_stocks(client: httpx.AsyncClient) -> List[Dict]:
                 close = float(str(close_raw).replace(",", "")) if close_raw else None
             except (ValueError, AttributeError):
                 close = None
+            # TPEx close quote endpoint also contains industry in some versions
+            industry = (
+                industry_map.get(code)
+                or item.get("IndustryCode", "")
+                or item.get("產業別", "")
+                or None
+            )
             stocks.append({
                 "stock_id": code,
                 "stock_name": name,
                 "market": "TPEx",
+                "industry": industry,
                 "close_price": close,
             })
         logger.info("TPEx: fetched %d stocks", len(stocks))
         if stocks:
-            logger.info("TPEx sample (first 5): %s", stocks[:5])
+            logger.info("TPEx sample (first 3): %s", stocks[:3])
         return stocks
     except Exception as e:
         logger.error("TPEx fetch error: %s", e)
@@ -110,15 +204,7 @@ async def _fetch_tpex_stocks(client: httpx.AsyncClient) -> List[Dict]:
 async def _fetch_finmind_revenue(
     client: httpx.AsyncClient, stock_id: str, start_date: str = "2015-01-01"
 ) -> List[Dict]:
-    """Fetch monthly revenue for a single stock from FinMind.
-
-    Returned row fields:
-      date           - report date "YYYY-MM-01"
-      stock_id       - e.g. "2330"
-      revenue_year   - year of the revenue month (int)
-      revenue_month  - month number 1-12 (int)
-      revenue        - NT$ amount
-    """
+    """Fetch monthly revenue for a single stock from FinMind."""
     params = {
         "dataset": "TaiwanStockMonthRevenue",
         "data_id": stock_id,
@@ -137,8 +223,7 @@ async def _fetch_finmind_revenue(
             return []
         rows = payload.get("data", [])
         if stock_id == "2330" and rows:
-            logger.info("FinMind 2330 sample (first 5): %s", rows[:5])
-            logger.info("FinMind 2330 field names: %s", list(rows[0].keys()))
+            logger.info("FinMind 2330 sample (first 3): %s", rows[:3])
         return rows
     except Exception as e:
         logger.error("FinMind %s error: %s", stock_id, e)
@@ -146,7 +231,7 @@ async def _fetch_finmind_revenue(
 
 
 # ---------------------------------------------------------------------------
-# Database upsert helpers  (use engine.begin() for atomic batch writes)
+# Database upsert helpers
 # ---------------------------------------------------------------------------
 
 async def _upsert_stocks(stocks: List[Dict]) -> None:
@@ -159,18 +244,19 @@ async def _upsert_stocks(stocks: List[Dict]) -> None:
             "stock_id": s["stock_id"],
             "stock_name": s["stock_name"],
             "market": s["market"],
+            "industry": s.get("industry"),
             "close_price": s.get("close_price"),
             "updated_at": now,
         }
         for s in stocks
     ]
-    # Build a single INSERT … ON CONFLICT DO UPDATE and execute in one shot
     stmt = sqlite_insert(Stock)
     stmt = stmt.on_conflict_do_update(
         index_elements=["stock_id"],
         set_={
             "stock_name": stmt.excluded.stock_name,
             "market": stmt.excluded.market,
+            "industry": stmt.excluded.industry,
             "close_price": stmt.excluded.close_price,
             "updated_at": stmt.excluded.updated_at,
         },
@@ -183,24 +269,16 @@ async def _upsert_stocks(stocks: List[Dict]) -> None:
 def _calc_pct_change(
     new_val: Optional[int], old_val: Optional[int]
 ) -> Optional[float]:
-    """Calculate percentage change from old to new."""
     if new_val is None or old_val is None or old_val == 0:
         return None
     return round((new_val - old_val) / abs(old_val) * 100, 2)
 
 
 async def _upsert_revenues(rows: List[Dict]) -> None:
-    """Upsert monthly revenue rows as a single atomic batch.
-
-    FinMind fields:
-      revenue_year  (int) - actual year
-      revenue_month (int) - actual month 1-12
-      revenue       (int) - NT$
-    """
+    """Upsert monthly revenue rows as a single atomic batch."""
     if not rows:
         return
 
-    # Build a lookup {(year, month): revenue} for MoM/YoY
     rev_map: Dict[Tuple[int, int], int] = {}
     for r in rows:
         y = int(r.get("revenue_year", 0) or 0)
@@ -219,22 +297,14 @@ async def _upsert_revenues(rows: List[Dict]) -> None:
                 continue
             revenue = int(r.get("revenue", 0) or 0)
 
-            # MoM: compare to previous month
             prev_m_key = (y, m - 1) if m > 1 else (y - 1, 12)
-            prev_rev = rev_map.get(prev_m_key)
-            revenue_mom = _calc_pct_change(revenue, prev_rev)
+            revenue_mom = _calc_pct_change(revenue, rev_map.get(prev_m_key))
+            revenue_yoy = _calc_pct_change(revenue, rev_map.get((y - 1, m)))
 
-            # YoY: compare to same month last year
-            yoy_rev = rev_map.get((y - 1, m))
-            revenue_yoy = _calc_pct_change(revenue, yoy_rev)
-
-            # Cumulative: sum Jan..month within same year present in batch
             cumulative_revenue: Optional[int] = sum(
                 rev_map.get((y, mo), 0) for mo in range(1, m + 1)
                 if (y, mo) in rev_map
             ) or None
-
-            # Cumulative YoY
             cum_prev: Optional[int] = sum(
                 rev_map.get((y - 1, mo), 0) for mo in range(1, m + 1)
                 if (y - 1, mo) in rev_map
@@ -270,7 +340,11 @@ async def _upsert_revenues(rows: List[Dict]) -> None:
     )
     async with engine.begin() as conn:
         await conn.execute(stmt, db_rows)
-    logger.info("Upserted %d revenue rows for %s", len(db_rows), db_rows[0]["stock_id"] if db_rows else "?")
+    logger.info(
+        "Upserted %d revenue rows for %s",
+        len(db_rows),
+        db_rows[0]["stock_id"] if db_rows else "?",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -286,10 +360,16 @@ async def run_sync(full: bool = False) -> None:
     await init_db()
 
     async with httpx.AsyncClient() as client:
-        # 1. Fetch stock lists from TWSE + TPEx
+        # 1. Fetch industry maps in parallel
+        twse_ind, tpex_ind = await asyncio.gather(
+            _fetch_twse_industry_map(client),
+            _fetch_tpex_industry_map(client),
+        )
+
+        # 2. Fetch stock lists with industry info
         twse_stocks, tpex_stocks = await asyncio.gather(
-            _fetch_twse_stocks(client),
-            _fetch_tpex_stocks(client),
+            _fetch_twse_stocks(client, twse_ind),
+            _fetch_tpex_stocks(client, tpex_ind),
         )
         all_stocks = twse_stocks + tpex_stocks
         await _upsert_stocks(all_stocks)
@@ -298,12 +378,11 @@ async def run_sync(full: bool = False) -> None:
             logger.warning("No stocks fetched; skipping revenue sync")
             return
 
-        # 2. Determine stocks & date range
+        # 3. Revenue sync
         if full:
             stock_ids = [s["stock_id"] for s in all_stocks]
             start_date = "2010-01-01"
         else:
-            # Incremental: priority large-cap stocks
             priority_ids = [
                 "2330", "2317", "2454", "2382", "2308",
                 "2303", "3711", "2412", "1301", "1303",
@@ -311,15 +390,10 @@ async def run_sync(full: bool = False) -> None:
             ]
             stock_ids = priority_ids
             today = date.today()
-            # Go back ~15 months to compute full YoY
-            if today.month >= 4:
-                start_date = "{}-01-01".format(today.year - 1)
-            else:
-                start_date = "{}-01-01".format(today.year - 2)
+            start_date = "{}-01-01".format(today.year - 1 if today.month >= 4 else today.year - 2)
 
         logger.info("Fetching revenue for %d stocks from %s", len(stock_ids), start_date)
 
-        # 3. Fetch with rate-limiting
         sem = asyncio.Semaphore(3)
 
         async def fetch_and_store(sid: str) -> None:
@@ -330,7 +404,6 @@ async def run_sync(full: bool = False) -> None:
                     await _upsert_revenues(rows)
                 await asyncio.sleep(0.3)
 
-        tasks = [fetch_and_store(sid) for sid in stock_ids]
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*[fetch_and_store(sid) for sid in stock_ids])
 
     logger.info("run_sync completed")
