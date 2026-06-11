@@ -5,6 +5,7 @@ export default function StockList() {
   const stocks = useAppStore(s => s.stocks)
   const stocksLoading = useAppStore(s => s.stocksLoading)
   const stocksError = useAppStore(s => s.stocksError)
+  const hasSearched = useAppStore(s => s.hasSearched)
   const selectedStock = useAppStore(s => s.selectedStock)
   const selectStock = useAppStore(s => s.selectStock)
 
@@ -25,7 +26,13 @@ export default function StockList() {
     )
   }
 
-  if (stocks.length === 0) {
+  // 初始狀態：尚未搜尋/篩選，且沒有資料 → 不顯示任何提示
+  if (stocks.length === 0 && !hasSearched) {
+    return null
+  }
+
+  // 有搜尋/篩選後才顯示「沒有符合條件的股票」
+  if (stocks.length === 0 && hasSearched) {
     return (
       <div className={styles.empty}>
         <span>沒有符合條件的股票</span>
