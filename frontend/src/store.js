@@ -8,8 +8,12 @@ export const useAppStore = create((set, get) => ({
   stocksLoading: false,
   stocksError: null,
   searchQuery: '',
-  marketFilter: '',
-  totalStocks: 0,
+  marketFilter: '',      // '' | 'TWSE' | 'TPEx'
+  industryFilter: '',    // '' or industry name
+  hasSearched: false,    // true after first user-initiated search/filter
+
+  // Industries
+  industries: [],        // list of industry names for current marketFilter
 
   // Selected stock & revenue
   selectedStock: null,
@@ -19,17 +23,42 @@ export const useAppStore = create((set, get) => ({
   revenueYears: 3,
 
   // Actions
-  setSearchQuery: (q) => set({ searchQuery: q }),
-  setMarketFilter: (m) => set({ marketFilter: m }),
-  setRevenueYears: (y) => set({ revenueYears: y }),
+  setSearchQuery: (q) => {
+    set({ searchQuery: q, hasSearched: true })
+  },
+
+  setMarketFilter: (m) => {
+    // Reset industry when switching market
+    set({ marketFilter: m, industryFilter: '', hasSearched: true })
+    // Fetch industries for this market
+    get().fetchIndustries(m)
+  },
+
+  setIndustryFilter: (ind) => {
+    set({ industryFilter: ind, hasSearched: true })
+  },
+
+  fetchIndustries: async (market) => {
+    try {
+      const params = new URLSearchParams()
+      if (market) params.set('market', market)
+      const res = await fetch(`${API_BASE}/industries?${params}`)
+      if (!res.ok) return
+      const data = await res.json()
+      set({ industries: data })
+    } catch {
+      set({ industries: [] })
+    }
+  },
 
   fetchStocks: async () => {
-    const { searchQuery, marketFilter } = get()
+    const { searchQuery, marketFilter, industryFilter } = get()
     set({ stocksLoading: true, stocksError: null })
     try {
-      const params = new URLSearchParams({ limit: 100, skip: 0 })
+      const params = new URLSearchParams({ limit: 200, skip: 0 })
       if (searchQuery) params.set('q', searchQuery)
       if (marketFilter) params.set('market', marketFilter)
+      if (industryFilter) params.set('industry', industryFilter)
       const res = await fetch(`${API_BASE}/stocks?${params}`)
       if (!res.ok) throw new Error('Failed to fetch stocks')
       const data = await res.json()
@@ -76,4 +105,7 @@ export const useAppStore = create((set, get) => ({
       return false
     }
   },
+
+  totalStocks: 0,
+  setRevenueYears: (y) => set({ revenueYears: y }),
 }))
