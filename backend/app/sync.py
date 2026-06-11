@@ -1,9 +1,8 @@
 """
 Data synchronisation helpers.
-
 Sources:
   - TWSE OpenAPI  (listed stocks + close price)
-  - TPEx OpenAPI  (OTC stocks  + close price)
+  - TPEx OpenAPI  (OTC stocks + close price)
   - FinMind API   (TaiwanStockMonthRevenue)
 
 FinMind TaiwanStockMonthRevenue field mapping:
@@ -24,14 +23,13 @@ from typing import Dict, List, Optional, Tuple
 import httpx
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from .database import AsyncSessionLocal, init_db
+from .database import engine, AsyncSessionLocal, init_db
 from .models import Stock, MonthRevenue
 
 logger = logging.getLogger(__name__)
 
 FINMIND_TOKEN = os.getenv("FINMIND_TOKEN", "")
 FINMIND_API = "https://api.finmindtrade.com/api/v4/data"
-
 
 # ---------------------------------------------------------------------------
 # Stock list helpers
@@ -148,38 +146,43 @@ async def _fetch_finmind_revenue(
 
 
 # ---------------------------------------------------------------------------
-# Database upsert helpers
+# Database upsert helpers  (use engine.begin() for atomic batch writes)
 # ---------------------------------------------------------------------------
 
 async def _upsert_stocks(stocks: List[Dict]) -> None:
-    """Upsert stock list into DB."""
+    """Upsert stock list into DB as a single atomic batch."""
     if not stocks:
         return
     now = datetime.utcnow().isoformat()
-    async with AsyncSessionLocal() as session:
-        for s in stocks:
-            stmt = sqlite_insert(Stock).values(
-                stock_id=s["stock_id"],
-                stock_name=s["stock_name"],
-                market=s["market"],
-                close_price=s.get("close_price"),
-                updated_at=now,
-            )
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["stock_id"],
-                set_={
-                    "stock_name": stmt.excluded.stock_name,
-                    "market": stmt.excluded.market,
-                    "close_price": stmt.excluded.close_price,
-                    "updated_at": stmt.excluded.updated_at,
-                },
-            )
-            await session.execute(stmt)
-        await session.commit()
-    logger.info("Upserted %d stocks", len(stocks))
+    rows = [
+        {
+            "stock_id": s["stock_id"],
+            "stock_name": s["stock_name"],
+            "market": s["market"],
+            "close_price": s.get("close_price"),
+            "updated_at": now,
+        }
+        for s in stocks
+    ]
+    # Build a single INSERT … ON CONFLICT DO UPDATE and execute in one shot
+    stmt = sqlite_insert(Stock)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["stock_id"],
+        set_={
+            "stock_name": stmt.excluded.stock_name,
+            "market": stmt.excluded.market,
+            "close_price": stmt.excluded.close_price,
+            "updated_at": stmt.excluded.updated_at,
+        },
+    )
+    async with engine.begin() as conn:
+        await conn.execute(stmt, rows)
+    logger.info("Upserted %d stocks", len(rows))
 
 
-def _calc_pct_change(new_val: Optional[int], old_val: Optional[int]) -> Optional[float]:
+def _calc_pct_change(
+    new_val: Optional[int], old_val: Optional[int]
+) -> Optional[float]:
     """Calculate percentage change from old to new."""
     if new_val is None or old_val is None or old_val == 0:
         return None
@@ -187,12 +190,12 @@ def _calc_pct_change(new_val: Optional[int], old_val: Optional[int]) -> Optional
 
 
 async def _upsert_revenues(rows: List[Dict]) -> None:
-    """Upsert monthly revenue rows.
+    """Upsert monthly revenue rows as a single atomic batch.
 
     FinMind fields:
-      revenue_year  (int)  - actual year
-      revenue_month (int)  - actual month 1-12
-      revenue       (int)  - NT$
+      revenue_year  (int) - actual year
+      revenue_month (int) - actual month 1-12
+      revenue       (int) - NT$
     """
     if not rows:
         return
@@ -206,63 +209,68 @@ async def _upsert_revenues(rows: List[Dict]) -> None:
         if y and m:
             rev_map[(y, m)] = rev
 
-    async with AsyncSessionLocal() as session:
-        for r in rows:
-            try:
-                stock_id = r.get("stock_id", "").strip()
-                y = int(r.get("revenue_year", 0) or 0)
-                m = int(r.get("revenue_month", 0) or 0)
-                if not stock_id or not y or not m:
-                    continue
-                revenue = int(r.get("revenue", 0) or 0)
+    db_rows = []
+    for r in rows:
+        try:
+            stock_id = r.get("stock_id", "").strip()
+            y = int(r.get("revenue_year", 0) or 0)
+            m = int(r.get("revenue_month", 0) or 0)
+            if not stock_id or not y or not m:
+                continue
+            revenue = int(r.get("revenue", 0) or 0)
 
-                # MoM: compare to previous month
-                prev_m_key = (y, m - 1) if m > 1 else (y - 1, 12)
-                prev_rev = rev_map.get(prev_m_key)
-                revenue_mom = _calc_pct_change(revenue, prev_rev)
+            # MoM: compare to previous month
+            prev_m_key = (y, m - 1) if m > 1 else (y - 1, 12)
+            prev_rev = rev_map.get(prev_m_key)
+            revenue_mom = _calc_pct_change(revenue, prev_rev)
 
-                # YoY: compare to same month last year
-                yoy_rev = rev_map.get((y - 1, m))
-                revenue_yoy = _calc_pct_change(revenue, yoy_rev)
+            # YoY: compare to same month last year
+            yoy_rev = rev_map.get((y - 1, m))
+            revenue_yoy = _calc_pct_change(revenue, yoy_rev)
 
-                # Cumulative: sum Jan..month within same year present in batch
-                cumulative_revenue = sum(
-                    rev_map.get((y, mo), 0) for mo in range(1, m + 1)
-                    if (y, mo) in rev_map
-                ) or None
+            # Cumulative: sum Jan..month within same year present in batch
+            cumulative_revenue: Optional[int] = sum(
+                rev_map.get((y, mo), 0) for mo in range(1, m + 1)
+                if (y, mo) in rev_map
+            ) or None
 
-                # Cumulative YoY
-                cum_prev = sum(
-                    rev_map.get((y - 1, mo), 0) for mo in range(1, m + 1)
-                    if (y - 1, mo) in rev_map
-                ) or None
-                cumulative_yoy = _calc_pct_change(cumulative_revenue, cum_prev)
+            # Cumulative YoY
+            cum_prev: Optional[int] = sum(
+                rev_map.get((y - 1, mo), 0) for mo in range(1, m + 1)
+                if (y - 1, mo) in rev_map
+            ) or None
+            cumulative_yoy = _calc_pct_change(cumulative_revenue, cum_prev)
 
-                stmt = sqlite_insert(MonthRevenue).values(
-                    stock_id=stock_id,
-                    year=y,
-                    month=m,
-                    revenue=revenue,
-                    revenue_mom=revenue_mom,
-                    revenue_yoy=revenue_yoy,
-                    cumulative_revenue=cumulative_revenue,
-                    cumulative_yoy=cumulative_yoy,
-                )
-                stmt = stmt.on_conflict_do_update(
-                    constraint="uq_stock_ym",
-                    set_={
-                        "revenue": stmt.excluded.revenue,
-                        "revenue_mom": stmt.excluded.revenue_mom,
-                        "revenue_yoy": stmt.excluded.revenue_yoy,
-                        "cumulative_revenue": stmt.excluded.cumulative_revenue,
-                        "cumulative_yoy": stmt.excluded.cumulative_yoy,
-                    },
-                )
-                await session.execute(stmt)
-            except Exception as e:
-                logger.warning("Revenue row error: %s | row=%s", e, r)
-        await session.commit()
-    logger.info("Upserted %d revenue rows", len(rows))
+            db_rows.append({
+                "stock_id": stock_id,
+                "year": y,
+                "month": m,
+                "revenue": revenue,
+                "revenue_mom": revenue_mom,
+                "revenue_yoy": revenue_yoy,
+                "cumulative_revenue": cumulative_revenue,
+                "cumulative_yoy": cumulative_yoy,
+            })
+        except Exception as e:
+            logger.warning("Revenue row error: %s | row=%s", e, r)
+
+    if not db_rows:
+        return
+
+    stmt = sqlite_insert(MonthRevenue)
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_stock_ym",
+        set_={
+            "revenue": stmt.excluded.revenue,
+            "revenue_mom": stmt.excluded.revenue_mom,
+            "revenue_yoy": stmt.excluded.revenue_yoy,
+            "cumulative_revenue": stmt.excluded.cumulative_revenue,
+            "cumulative_yoy": stmt.excluded.cumulative_yoy,
+        },
+    )
+    async with engine.begin() as conn:
+        await conn.execute(stmt, db_rows)
+    logger.info("Upserted %d revenue rows for %s", len(db_rows), db_rows[0]["stock_id"] if db_rows else "?")
 
 
 # ---------------------------------------------------------------------------
