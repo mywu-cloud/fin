@@ -1,6 +1,18 @@
 import { useAppStore } from '../store'
 import styles from './StockList.module.css'
 
+function formatChange(change) {
+  if (change == null) return null
+  const sign = change >= 0 ? '+' : ''
+  return `${sign}${change.toFixed(2)}`
+}
+
+function formatChangePct(pct) {
+  if (pct == null) return null
+  const sign = pct >= 0 ? '+' : ''
+  return `${sign}${pct.toFixed(2)}%`
+}
+
 export default function StockList() {
   const stocks = useAppStore(s => s.stocks)
   const stocksLoading = useAppStore(s => s.stocksLoading)
@@ -26,13 +38,9 @@ export default function StockList() {
     )
   }
 
-  // 初始狀態：尚未搜尋/篩選，且沒有資料 → 不顯示任何提示
-  if (stocks.length === 0 && !hasSearched) {
-    return null
-  }
+  if (stocks.length === 0 && !hasSearched) return null
 
-  // 有搜尋/篩選後才顯示「沒有符合條件的股票」
-  if (stocks.length === 0 && hasSearched) {
+  if (stocks.length === 0) {
     return (
       <div className={styles.empty}>
         <span>沒有符合條件的股票</span>
@@ -42,28 +50,38 @@ export default function StockList() {
 
   return (
     <div className={styles.list}>
-      {stocks.map(stock => (
-        <button
-          key={stock.stock_id}
-          className={`${styles.item} ${selectedStock?.stock_id === stock.stock_id ? styles.selected : ''}`}
-          onClick={() => selectStock(stock)}
-        >
-          <div className={styles.itemLeft}>
-            <span className={styles.stockId}>{stock.stock_id}</span>
-            <span className={styles.stockName}>{stock.stock_name}</span>
-          </div>
-          <div className={styles.itemRight}>
-            {stock.close_price != null && (
-              <span className={styles.price}>
-                {stock.close_price.toFixed(2)}
+      {stocks.map(stock => {
+        const up = stock.change != null ? stock.change > 0 : null
+        const down = stock.change != null ? stock.change < 0 : null
+        const colorCls = up ? styles.up : down ? styles.down : styles.flat
+
+        return (
+          <button
+            key={stock.stock_id}
+            className={`${styles.item} ${selectedStock?.stock_id === stock.stock_id ? styles.selected : ''}`}
+            onClick={() => selectStock(stock)}
+          >
+            {/* Left: code + name */}
+            <div className={styles.itemLeft}>
+              <span className={styles.stockId}>{stock.stock_id}</span>
+              <span className={styles.stockName}>{stock.stock_name}</span>
+            </div>
+
+            {/* Right: price / change / change_pct */}
+            <div className={styles.itemRight}>
+              <span className={`${styles.price} ${colorCls}`}>
+                {stock.close_price != null ? stock.close_price.toFixed(2) : '--'}
               </span>
-            )}
-            <span className={`${styles.market} ${stock.market === 'TWSE' ? styles.twse : styles.tpex}`}>
-              {stock.market === 'TWSE' ? '上市' : '上櫃'}
-            </span>
-          </div>
-        </button>
-      ))}
+              <span className={`${styles.changeRow} ${colorCls}`}>
+                {formatChange(stock.change)}
+                {stock.change_pct != null && (
+                  <span className={styles.changePct}> ({formatChangePct(stock.change_pct)})</span>
+                )}
+              </span>
+            </div>
+          </button>
+        )
+      })}
     </div>
   )
 }
