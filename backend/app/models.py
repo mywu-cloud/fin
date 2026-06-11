@@ -7,9 +7,11 @@ class Stock(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     stock_id = Column(String(10), nullable=False, unique=True, index=True)
     stock_name = Column(String(50), nullable=False)
-    market = Column(String(10), nullable=False)   # TWSE / TPEx
-    industry = Column(String(50), nullable=True)  # 產業別
-    close_price = Column(Float, nullable=True)
+    market = Column(String(10), nullable=False)    # TWSE / TPEx
+    industry = Column(String(50), nullable=True)   # 產業別
+    close_price = Column(Float, nullable=True)     # 收盤價
+    change = Column(Float, nullable=True)          # 漲跌 (price change)
+    change_pct = Column(Float, nullable=True)      # 漲跌幅 %
     updated_at = Column(String(30), nullable=True)
 
 
