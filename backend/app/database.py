@@ -9,19 +9,22 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./fin.db")
 
+# NullPool is required for aiosqlite to avoid "database is locked" errors.
+# aiosqlite doesn't benefit from connection pooling and SQLite only allows
+# one writer at a time; NullPool ensures each operation gets a fresh
+# connection and releases it immediately, preventing lock contention.
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
+    poolclass=NullPool,
     connect_args={
-        "timeout": 30,          # wait up to 30s for lock to release
+        "timeout": 30,          # wait up to 30s for write lock
         "check_same_thread": False,
     },
-    # Serialise writes: only one connection writes at a time
-    pool_size=1,
-    max_overflow=0,
 )
 
 AsyncSessionLocal = async_sessionmaker(
