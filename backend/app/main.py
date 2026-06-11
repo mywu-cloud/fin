@@ -6,13 +6,14 @@ import logging
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import List, Optional
 
 from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, func
+from sqlalchemy import select, func, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import get_db, init_db
@@ -26,12 +27,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 一般產業股：4碼純數字，首碼 1-9（1101~9999）
-# 上櫃 TPEx 也是4碼數字，但從 1000 起，或少數 3~4 碼
 # 排除：00開頭(ETF), 含字母, 超過4碼數字, 4碼但以0開頭
 _STOCK_RE = re.compile(r'^[1-9][0-9]{3}$')
 
+
 def _is_industry_stock(stock_id: str) -> bool:
-    """Return True if stock_id is a regular industry stock (not ETF/warrant)."""
     return bool(_STOCK_RE.match(stock_id))
 
 
@@ -88,6 +88,17 @@ app.add_middleware(
 )
 
 
+def _stock_dict(s: Stock) -> dict:
+    return {
+        "stock_id": s.stock_id,
+        "stock_name": s.stock_name,
+        "market": s.market,
+        "industry": s.industry,
+        "close_price": s.close_price,
+        "updated_at": s.updated_at,
+    }
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -97,8 +108,9 @@ async def health():
 async def list_stocks(
     q: str = Query(default=""),
     market: str = Query(default=""),
+    industry: str = Query(default=""),
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 200,
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(Stock)
@@ -109,22 +121,33 @@ async def list_stocks(
         )
     if market:
         stmt = stmt.where(Stock.market == market)
+    if industry:
+        stmt = stmt.where(Stock.industry == industry)
     stmt = stmt.order_by(Stock.stock_id).offset(skip).limit(limit)
     result = await db.execute(stmt)
     stocks = result.scalars().all()
-    # Filter out ETF / warrants / preferred shares in Python
-    # (SQLite regex support is limited)
     return [
-        {
-            "stock_id": s.stock_id,
-            "stock_name": s.stock_name,
-            "market": s.market,
-            "close_price": s.close_price,
-            "updated_at": s.updated_at,
-        }
+        _stock_dict(s)
         for s in stocks
         if _is_industry_stock(s.stock_id)
     ]
+
+
+@app.get("/api/industries")
+async def list_industries(
+    market: str = Query(default=""),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return sorted list of distinct industries for a given market."""
+    stmt = select(distinct(Stock.industry)).where(Stock.industry.isnot(None))
+    if market:
+        stmt = stmt.where(Stock.market == market)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    # Only include industries for stocks that pass the industry-stock filter
+    # (We query all and filter; for industries we trust the industry field itself)
+    industries = sorted([r for r in rows if r and r.strip()])
+    return industries
 
 
 @app.get("/api/stocks/count")
@@ -139,13 +162,7 @@ async def get_stock(stock_id: str, db: AsyncSession = Depends(get_db)):
     stock = result.scalar_one_or_none()
     if not stock:
         raise HTTPException(status_code=404, detail="Stock not found")
-    return {
-        "stock_id": stock.stock_id,
-        "stock_name": stock.stock_name,
-        "market": stock.market,
-        "close_price": stock.close_price,
-        "updated_at": stock.updated_at,
-    }
+    return _stock_dict(stock)
 
 
 @app.get("/api/revenue/{stock_id}")
