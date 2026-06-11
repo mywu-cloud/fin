@@ -7,10 +7,9 @@ import styles from './App.module.css'
 
 export default function App() {
   const fetchStocks = useAppStore(s => s.fetchStocks)
-  const fetchStockCount = useAppStore(s => s.fetchStockCount)
   const searchQuery = useAppStore(s => s.searchQuery)
   const marketFilter = useAppStore(s => s.marketFilter)
-  const totalStocks = useAppStore(s => s.totalStocks)
+  const industryFilter = useAppStore(s => s.industryFilter)
   const triggerSync = useAppStore(s => s.triggerSync)
   const selectedStock = useAppStore(s => s.selectedStock)
 
@@ -24,20 +23,15 @@ export default function App() {
     }, 300)
   }, [fetchStocks])
 
-  useEffect(() => {
-    fetchStockCount()
-    fetchStocks()
-  }, [])
-
+  // Only fetch stocks when filters change (not on mount)
   useEffect(() => {
     debouncedFetch()
-  }, [searchQuery, marketFilter])
+  }, [searchQuery, marketFilter, industryFilter])
 
   const handleSync = async () => {
     await triggerSync(false)
     setTimeout(() => {
       fetchStocks()
-      fetchStockCount()
     }, 2000)
   }
 
@@ -46,9 +40,6 @@ export default function App() {
       <header className={styles.header}>
         <h1 className={styles.title}>台股月營收查詢</h1>
         <div className={styles.headerRight}>
-          {totalStocks > 0 && (
-            <span className={styles.stockCount}>共 {totalStocks.toLocaleString()} 支股票</span>
-          )}
           <button className={styles.syncBtn} onClick={handleSync}>
             🔄 更新資料
           </button>
@@ -68,11 +59,6 @@ export default function App() {
             <div className={styles.empty}>
               <div className={styles.emptyIcon}>📊</div>
               <p>請從左側選擇一支股票，查看月營收資料</p>
-              {totalStocks === 0 && (
-                <p className={styles.emptyHint}>
-                  資料庫尚無資料，請點擊「更新資料」按鈕同步
-                </p>
-              )}
             </div>
           )}
         </section>
