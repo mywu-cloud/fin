@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 # Load .env before anything else
 from dotenv import load_dotenv
@@ -13,7 +14,6 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from apscheduler.schedulers.background import BackgroundScheduler
 
 from .database import get_db, init_db
 from .models import Stock, MonthRevenue
@@ -25,57 +25,55 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-scheduler = BackgroundScheduler(timezone="Asia/Taipei")
-
 
 async def _safe_sync(full: bool = False) -> None:
-    """Run sync and swallow exceptions so server keeps running."""
+    """Run sync, swallow exceptions so server keeps running."""
     try:
         await run_sync(full=full)
     except Exception as exc:
-        logger.error("run_sync crashed: %s", exc, exc_info=True)
+        logger.error("run_sync error: %s", exc, exc_info=True)
 
 
-def _schedule_sync() -> None:
-    """Called by APScheduler (sync context) — fires async sync task."""
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        asyncio.run_coroutine_threadsafe(_safe_sync(full=False), loop)
-    else:
-        asyncio.run(_safe_sync(full=False))
+async def _daily_scheduler() -> None:
+    """Pure-asyncio loop: fire sync every day at 18:30 CST."""
+    while True:
+        try:
+            now = datetime.now()
+            # Seconds until next 18:30
+            target_hour, target_min = 18, 30
+            secs_today = (target_hour * 60 + target_min) * 60
+            secs_now = (now.hour * 60 + now.minute) * 60 + now.second
+            wait = secs_today - secs_now
+            if wait <= 0:
+                wait += 86400  # already past 18:30, wait until tomorrow
+            logger.info("Daily sync scheduled in %.0f minutes", wait / 60)
+            await asyncio.sleep(wait)
+            logger.info("Running scheduled daily sync")
+            await _safe_sync(full=False)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error("Scheduler loop error: %s", exc)
+            await asyncio.sleep(3600)  # retry in 1h
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     await init_db()
     logger.info("DB initialised")
 
-    # Auto-sync on startup (non-blocking background task)
+    # Startup sync (non-blocking)
     asyncio.create_task(_safe_sync(full=False))
 
-    # Schedule daily sync at 18:30 (after market close)
-    try:
-        scheduler.add_job(
-            _schedule_sync,
-            "cron",
-            hour=18,
-            minute=30,
-            id="daily_sync",
-            replace_existing=True,
-        )
-        scheduler.start()
-        logger.info("Scheduler started (daily 18:30)")
-    except Exception as exc:
-        logger.warning("Scheduler failed to start: %s", exc)
+    # Daily scheduler (pure asyncio, no APScheduler)
+    sched_task = asyncio.create_task(_daily_scheduler())
 
     yield
 
-    # Shutdown
+    sched_task.cancel()
     try:
-        if scheduler.running:
-            scheduler.shutdown(wait=False)
-    except Exception:
+        await sched_task
+    except asyncio.CancelledError:
         pass
     logger.info("Shutdown complete")
 
@@ -102,8 +100,8 @@ async def health():
 
 @app.get("/api/stocks")
 async def list_stocks(
-    q: str = Query(default="", description="Search by stock_id or stock_name"),
-    market: str = Query(default="", description="TWSE or TPEx"),
+    q: str = Query(default=""),
+    market: str = Query(default=""),
     skip: int = 0,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
@@ -111,7 +109,8 @@ async def list_stocks(
     stmt = select(Stock)
     if q:
         stmt = stmt.where(
-            (Stock.stock_id.ilike("%" + q + "%")) | (Stock.stock_name.ilike("%" + q + "%"))
+            (Stock.stock_id.ilike("%" + q + "%")) |
+            (Stock.stock_name.ilike("%" + q + "%"))
         )
     if market:
         stmt = stmt.where(Stock.market == market)
@@ -157,7 +156,6 @@ async def get_revenue(
     years: int = Query(default=3, ge=1, le=10),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return monthly revenue for a stock, sorted desc."""
     stmt = (
         select(MonthRevenue)
         .where(MonthRevenue.stock_id == stock_id)
@@ -184,6 +182,5 @@ async def get_revenue(
 
 @app.post("/api/sync")
 async def trigger_sync(full: bool = False):
-    """Manually trigger a data sync."""
     asyncio.create_task(_safe_sync(full=full))
     return {"status": "sync started", "full": full}
