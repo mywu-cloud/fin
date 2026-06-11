@@ -3,17 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import List, Optional
 
 from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, func, distinct, and_, or_
+from sqlalchemy import select, func, distinct, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import get_db, init_db
@@ -26,19 +24,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 一般產業股 SQL filter：4碼，首碼 1-9
-# SQLite GLOB: stock_id GLOB '[1-9][0-9][0-9][0-9]'
-# Also use Python-side check as safety net
-_STOCK_RE = re.compile(r'^[1-9][0-9]{3}$')
 
-def _is_industry_stock(stock_id: str) -> bool:
-    return bool(_STOCK_RE.match(stock_id))
-
-def _industry_stock_filter():
-    """SQLAlchemy filter: 4-digit code starting with 1-9."""
-    return and_(
+# ---------------------------------------------------------------------------
+# Industry-stock SQL filter (no Python-side filtering needed)
+# 4-digit code, first digit 1-9
+# ---------------------------------------------------------------------------
+def _industry_filter():
+    return (
         func.length(Stock.stock_id) == 4,
-        Stock.stock_id.regexp_match(r'^[1-9][0-9]{3}$'),
+        or_(
+            Stock.stock_id.like("1%"), Stock.stock_id.like("2%"),
+            Stock.stock_id.like("3%"), Stock.stock_id.like("4%"),
+            Stock.stock_id.like("5%"), Stock.stock_id.like("6%"),
+            Stock.stock_id.like("7%"), Stock.stock_id.like("8%"),
+            Stock.stock_id.like("9%"),
+        ),
     )
 
 
@@ -60,7 +60,6 @@ async def _daily_scheduler() -> None:
                 wait += 86400
             logger.info("Daily sync scheduled in %.0f minutes", wait / 60)
             await asyncio.sleep(wait)
-            logger.info("Running scheduled daily sync")
             await _safe_sync(full=False)
         except asyncio.CancelledError:
             break
@@ -102,6 +101,8 @@ def _stock_dict(s: Stock) -> dict:
         "market": s.market,
         "industry": s.industry,
         "close_price": s.close_price,
+        "change": s.change,
+        "change_pct": s.change_pct,
         "updated_at": s.updated_at,
     }
 
@@ -120,26 +121,13 @@ async def list_stocks(
     limit: int = 500,
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = select(Stock)
-
-    # Filter to industry stocks only at SQL level:
-    # 4 chars, starts with 1-9, rest digits
-    # SQLite supports GLOB; use length + LIKE patterns as portable fallback
-    stmt = stmt.where(func.length(Stock.stock_id) == 4)
-    stmt = stmt.where(Stock.stock_id.like("1%")
-                      | Stock.stock_id.like("2%")
-                      | Stock.stock_id.like("3%")
-                      | Stock.stock_id.like("4%")
-                      | Stock.stock_id.like("5%")
-                      | Stock.stock_id.like("6%")
-                      | Stock.stock_id.like("7%")
-                      | Stock.stock_id.like("8%")
-                      | Stock.stock_id.like("9%"))
+    len_filter, first_digit_filter = _industry_filter()
+    stmt = select(Stock).where(len_filter).where(first_digit_filter)
 
     if q:
         stmt = stmt.where(
-            (Stock.stock_id.ilike("%" + q + "%")) |
-            (Stock.stock_name.ilike("%" + q + "%"))
+            Stock.stock_id.ilike("%" + q + "%") |
+            Stock.stock_name.ilike("%" + q + "%")
         )
     if market:
         stmt = stmt.where(Stock.market == market)
@@ -148,8 +136,7 @@ async def list_stocks(
 
     stmt = stmt.order_by(Stock.stock_id).offset(skip).limit(limit)
     result = await db.execute(stmt)
-    stocks = result.scalars().all()
-    return [_stock_dict(s) for s in stocks]
+    return [_stock_dict(s) for s in result.scalars().all()]
 
 
 @app.get("/api/industries")
@@ -157,24 +144,17 @@ async def list_industries(
     market: str = Query(default=""),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return sorted list of distinct industries, only for industry stocks."""
+    len_filter, first_digit_filter = _industry_filter()
     stmt = (
         select(distinct(Stock.industry))
         .where(Stock.industry.isnot(None))
-        .where(func.length(Stock.stock_id) == 4)
-        .where(
-            Stock.stock_id.like("1%") | Stock.stock_id.like("2%") |
-            Stock.stock_id.like("3%") | Stock.stock_id.like("4%") |
-            Stock.stock_id.like("5%") | Stock.stock_id.like("6%") |
-            Stock.stock_id.like("7%") | Stock.stock_id.like("8%") |
-            Stock.stock_id.like("9%")
-        )
+        .where(len_filter)
+        .where(first_digit_filter)
     )
     if market:
         stmt = stmt.where(Stock.market == market)
     result = await db.execute(stmt)
-    rows = result.scalars().all()
-    return sorted([r for r in rows if r and r.strip()])
+    return sorted([r for r in result.scalars().all() if r and r.strip()])
 
 
 @app.get("/api/stocks/count")
@@ -210,11 +190,8 @@ async def get_revenue(
         raise HTTPException(status_code=404, detail="No revenue data found")
     return [
         {
-            "year": r.year,
-            "month": r.month,
-            "revenue": r.revenue,
-            "revenue_mom": r.revenue_mom,
-            "revenue_yoy": r.revenue_yoy,
+            "year": r.year, "month": r.month, "revenue": r.revenue,
+            "revenue_mom": r.revenue_mom, "revenue_yoy": r.revenue_yoy,
             "cumulative_revenue": r.cumulative_revenue,
             "cumulative_yoy": r.cumulative_yoy,
         }
