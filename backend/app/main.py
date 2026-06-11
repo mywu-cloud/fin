@@ -1,11 +1,17 @@
 """FastAPI application entry point."""
+from __future__ import annotations
+
 import asyncio
 import logging
 from contextlib import asynccontextmanager
 
+# Load .env before anything else
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -74,13 +80,13 @@ async def list_stocks(
     q: str = Query(default="", description="Search by stock_id or stock_name"),
     market: str = Query(default="", description="TWSE or TPEx"),
     skip: int = 0,
-    limit: int = 50,
+    limit: int = 100,
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(Stock)
     if q:
         stmt = stmt.where(
-            (Stock.stock_id.ilike(f"%{q}%")) | (Stock.stock_name.ilike(f"%{q}%"))
+            (Stock.stock_id.ilike("%" + q + "%")) | (Stock.stock_name.ilike("%" + q + "%"))
         )
     if market:
         stmt = stmt.where(Stock.market == market)
@@ -123,10 +129,10 @@ async def get_stock(stock_id: str, db: AsyncSession = Depends(get_db)):
 @app.get("/api/revenue/{stock_id}")
 async def get_revenue(
     stock_id: str,
-    years: int = Query(default=3, ge=1, le=10, description="Number of years to return"),
+    years: int = Query(default=3, ge=1, le=10),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return monthly revenue for a stock, sorted by year+month desc."""
+    """Return monthly revenue for a stock, sorted desc."""
     stmt = (
         select(MonthRevenue)
         .where(MonthRevenue.stock_id == stock_id)
