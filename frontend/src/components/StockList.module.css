@@ -8,7 +8,7 @@
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 10px 12px;
+  padding: 8px 12px;
   background: transparent;
   border: none;
   border-bottom: 1px solid var(--border);
@@ -27,17 +27,20 @@
   border-left: 2px solid var(--accent);
 }
 
+/* Left column */
 .itemLeft {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  flex: 1;
 }
 
 .stockId {
   font-size: 13px;
   font-weight: 600;
-  font-family: monospace;
+  font-family: "Helvetica Neue", monospace;
+  letter-spacing: 0.02em;
 }
 
 .stockName {
@@ -46,39 +49,51 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 160px;
+  max-width: 140px;
 }
 
+/* Right column: price / change / pct */
 .itemRight {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 2px;
+  gap: 1px;
   flex-shrink: 0;
+  margin-left: 8px;
 }
 
 .price {
   font-size: 13px;
-  font-weight: 600;
-  font-family: monospace;
+  font-weight: 700;
+  font-family: "Helvetica Neue", monospace;
+  letter-spacing: 0.01em;
 }
 
-.market {
+.changeRow {
+  font-size: 11px;
+  font-family: "Helvetica Neue", monospace;
+  white-space: nowrap;
+}
+
+.changePct {
   font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 3px;
+  opacity: 0.85;
 }
 
-.twse {
-  background: rgba(56, 139, 253, 0.2);
-  color: var(--accent-hover);
+/* Taiwan stock color convention: red=up, green=down */
+.up {
+  color: var(--up);      /* #e05252 */
 }
 
-.tpex {
-  background: rgba(63, 185, 80, 0.2);
-  color: var(--down);
+.down {
+  color: var(--down);    /* #3fb950 */
 }
 
+.flat {
+  color: var(--text-secondary);
+}
+
+/* Loading / error / empty */
 .loading, .error, .empty {
   display: flex;
   flex-direction: column;
