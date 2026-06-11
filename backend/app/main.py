@@ -13,7 +13,7 @@ load_dotenv()
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, func, distinct
+from sqlalchemy import select, func, distinct, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import get_db, init_db
@@ -26,13 +26,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 一般產業股：4碼純數字，首碼 1-9（1101~9999）
-# 排除：00開頭(ETF), 含字母, 超過4碼數字, 4碼但以0開頭
+# 一般產業股 SQL filter：4碼，首碼 1-9
+# SQLite GLOB: stock_id GLOB '[1-9][0-9][0-9][0-9]'
+# Also use Python-side check as safety net
 _STOCK_RE = re.compile(r'^[1-9][0-9]{3}$')
-
 
 def _is_industry_stock(stock_id: str) -> bool:
     return bool(_STOCK_RE.match(stock_id))
+
+def _industry_stock_filter():
+    """SQLAlchemy filter: 4-digit code starting with 1-9."""
+    return and_(
+        func.length(Stock.stock_id) == 4,
+        Stock.stock_id.regexp_match(r'^[1-9][0-9]{3}$'),
+    )
 
 
 async def _safe_sync(full: bool = False) -> None:
@@ -110,10 +117,25 @@ async def list_stocks(
     market: str = Query(default=""),
     industry: str = Query(default=""),
     skip: int = 0,
-    limit: int = 200,
+    limit: int = 500,
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(Stock)
+
+    # Filter to industry stocks only at SQL level:
+    # 4 chars, starts with 1-9, rest digits
+    # SQLite supports GLOB; use length + LIKE patterns as portable fallback
+    stmt = stmt.where(func.length(Stock.stock_id) == 4)
+    stmt = stmt.where(Stock.stock_id.like("1%")
+                      | Stock.stock_id.like("2%")
+                      | Stock.stock_id.like("3%")
+                      | Stock.stock_id.like("4%")
+                      | Stock.stock_id.like("5%")
+                      | Stock.stock_id.like("6%")
+                      | Stock.stock_id.like("7%")
+                      | Stock.stock_id.like("8%")
+                      | Stock.stock_id.like("9%"))
+
     if q:
         stmt = stmt.where(
             (Stock.stock_id.ilike("%" + q + "%")) |
@@ -123,14 +145,11 @@ async def list_stocks(
         stmt = stmt.where(Stock.market == market)
     if industry:
         stmt = stmt.where(Stock.industry == industry)
+
     stmt = stmt.order_by(Stock.stock_id).offset(skip).limit(limit)
     result = await db.execute(stmt)
     stocks = result.scalars().all()
-    return [
-        _stock_dict(s)
-        for s in stocks
-        if _is_industry_stock(s.stock_id)
-    ]
+    return [_stock_dict(s) for s in stocks]
 
 
 @app.get("/api/industries")
@@ -138,16 +157,24 @@ async def list_industries(
     market: str = Query(default=""),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return sorted list of distinct industries for a given market."""
-    stmt = select(distinct(Stock.industry)).where(Stock.industry.isnot(None))
+    """Return sorted list of distinct industries, only for industry stocks."""
+    stmt = (
+        select(distinct(Stock.industry))
+        .where(Stock.industry.isnot(None))
+        .where(func.length(Stock.stock_id) == 4)
+        .where(
+            Stock.stock_id.like("1%") | Stock.stock_id.like("2%") |
+            Stock.stock_id.like("3%") | Stock.stock_id.like("4%") |
+            Stock.stock_id.like("5%") | Stock.stock_id.like("6%") |
+            Stock.stock_id.like("7%") | Stock.stock_id.like("8%") |
+            Stock.stock_id.like("9%")
+        )
+    )
     if market:
         stmt = stmt.where(Stock.market == market)
     result = await db.execute(stmt)
     rows = result.scalars().all()
-    # Only include industries for stocks that pass the industry-stock filter
-    # (We query all and filter; for industries we trust the industry field itself)
-    industries = sorted([r for r in rows if r and r.strip()])
-    return industries
+    return sorted([r for r in rows if r and r.strip()])
 
 
 @app.get("/api/stocks/count")
