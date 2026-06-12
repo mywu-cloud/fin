@@ -1,4 +1,5 @@
 // functions/api/stocks.js
+// v2 - with D1 binding
 // GET /api/stocks?q=&market=&industry=&skip=0&limit=200
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
