@@ -1,55 +1,54 @@
 :root {
-  --up: #e05252;
-  --down: #3fb950;
-  --neutral: #8b949e;
+    --up: #c0392b;
+    --down: #27ae60;
+    --neutral: #7f8c8d;
 
-  --bg-primary: #0d1117;
-  --bg-secondary: #161b22;
-  --bg-card: #1c2128;
-  --border: #30363d;
-  --text-primary: #e6edf3;
-  --text-secondary: #8b949e;
-  --accent: #388bfd;
-  --accent-hover: #58a6ff;
+  --bg-primary: #f5f6fa;
+    --bg-secondary: #ffffff;
+    --bg-card: #f0f2f5;
+    --border: #dde1e7;
+    --text-primary: #1a1a2e;
+    --text-secondary: #6b7280;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
 }
 
 * {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
 }
 
 body {
-  font-family: "Helvetica Neue", Helvetica, "PingFang TC", "Noto Sans TC",
-    "Microsoft JhengHei", Arial, sans-serif;
-  font-size: 13px;
-  line-height: 1.5;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  min-height: 100vh;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+    font-family: "Helvetica Neue", Helvetica, "PingFang TC", "Noto Sans TC",
+          "Microsoft JhengHei", Arial, sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
 }
 
-/* 全站最小字體 13px */
 * {
-  font-size: max(13px, inherit);
+    font-size: max(13px, inherit);
 }
 
 button, input, select, textarea {
-  font-family: inherit;
-  font-size: inherit;
+    font-family: inherit;
+    font-size: inherit;
 }
 
 ::-webkit-scrollbar {
-  width: 6px;
+    width: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--bg-secondary);
+    background: var(--bg-secondary);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
+    background: var(--border);
+    border-radius: 3px;
 }
